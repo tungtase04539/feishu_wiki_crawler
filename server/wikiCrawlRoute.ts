@@ -96,19 +96,21 @@ export function registerWikiCrawlRoute(app: Express) {
         return;
       }
 
-      // Resolve space_id
+      // Resolve space_id from node token in URL.
+      // The URL token is a node_token, NOT a space_id.
+      // We call get_node to get the space_id, then crawl the ENTIRE space from root.
       sendEvent(res, { type: "progress", count: 0, message: "Resolving wiki space..." });
 
       let spaceId: string;
-      let rootNodeToken: string | undefined;
 
       try {
         const nodeInfo = await getWikiNodeInfo(token, accessToken);
-        if (nodeInfo) {
+        if (nodeInfo && nodeInfo.space_id) {
           spaceId = nodeInfo.space_id;
-          rootNodeToken = nodeInfo.node_token;
+          console.log(`[Wiki] Resolved space_id=${spaceId} from node_token=${token}`);
         } else {
           spaceId = token;
+          console.log(`[Wiki] Fallback: using token as space_id: ${token}`);
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -119,12 +121,13 @@ export function registerWikiCrawlRoute(app: Express) {
               "Your User Access Token has expired (tokens expire after 2 hours).\n\n" +
               "Please get a new token from https://open.feishu.cn/api-explorer",
           });
-        } else {
-          sendEvent(res, { type: "error", message: `Could not access wiki: ${msg}` });
+          cleanup();
+          res.end();
+          return;
         }
-        cleanup();
-        res.end();
-        return;
+        // If get_node fails, try using token as space_id
+        console.warn(`[Wiki] get_node failed: ${msg}. Trying token as space_id.`);
+        spaceId = token;
       }
 
       // Fetch all nodes with progress
@@ -138,7 +141,7 @@ export function registerWikiCrawlRoute(app: Express) {
           spaceId,
           accessToken,
           domain,
-          rootNodeToken,
+          undefined, // always crawl from root of space
           0,
           (count) => {
             allNodes.length = 0; // not used here, progress only
