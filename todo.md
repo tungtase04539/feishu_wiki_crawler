@@ -33,3 +33,16 @@
 - [x] Write vitest for Feishu API URL parsing
 - [x] Write vitest for recursive node fetching logic (buildTree)
 - [x] Write vitest for CSV export utility (buildNodeUrl)
+- [x] Fix: 'No pages found' - improve space_id extraction, use get_node API to resolve node_token -> space_id
+- [x] Fix: add better error logging to diagnose empty results
+
+## Performance Optimization (11,000+ nodes)
+- [x] Backend: replace recursive sequential fetch with concurrent BFS (parallel level fetching)
+- [x] Backend: add SSE streaming endpoint to push real-time progress to frontend
+- [x] Backend: increase concurrency with p-limit (5 concurrent requests)
+- [x] Backend: fix token expired error message (show clear message instead of "No pages found")
+- [x] Frontend: add real-time progress bar showing nodes fetched count
+- [x] Frontend: virtual scroll for table (custom virtual scroll) to handle 11k+ rows
+- [x] Frontend: lazy/virtualized tree view for large hierarchies
+- [x] Frontend: show estimated time remaining during crawl
+- [x] Frontend: stream results as they arrive instead of waiting for all (SSE)

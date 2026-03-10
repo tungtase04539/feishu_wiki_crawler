@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   ChevronUp,
   ChevronDown,
@@ -9,10 +9,10 @@ import {
   Table2,
   Brain,
   File,
+  Search,
+  X,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { WikiNode } from "./WikiTreeView";
 
@@ -44,10 +44,23 @@ function formatTimestamp(ts: string): string {
   const num = parseInt(ts, 10);
   if (isNaN(num)) return ts;
   return new Date(num * 1000).toLocaleDateString("vi-VN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
+    year: "numeric", month: "2-digit", day: "2-digit",
   });
+}
+
+function highlightText(text: string, query: string): React.ReactNode {
+  if (!query) return text;
+  try {
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const parts = text.split(new RegExp(`(${escaped})`, "gi"));
+    return parts.map((part, i) =>
+      part.toLowerCase() === query.toLowerCase() ? (
+        <mark key={i} className="bg-yellow-200 dark:bg-yellow-800 text-inherit rounded-sm px-0.5">{part}</mark>
+      ) : part
+    );
+  } catch {
+    return text;
+  }
 }
 
 interface SortHeaderProps {
@@ -56,34 +69,58 @@ interface SortHeaderProps {
   currentField: SortField;
   currentDir: SortDir;
   onSort: (field: SortField) => void;
-  className?: string;
+  style?: React.CSSProperties;
 }
 
-function SortHeader({ label, field, currentField, currentDir, onSort, className }: SortHeaderProps) {
+function SortHeader({ label, field, currentField, currentDir, onSort, style }: SortHeaderProps) {
   const isActive = currentField === field;
   return (
-    <th
-      className={cn(
-        "px-3 py-2.5 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider cursor-pointer select-none",
-        "hover:text-foreground transition-colors",
-        className
-      )}
+    <div
+      className="px-3 flex items-center gap-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider cursor-pointer select-none hover:text-foreground transition-colors"
+      style={style}
       onClick={() => onSort(field)}
     >
-      <div className="flex items-center gap-1">
-        {label}
-        {isActive ? (
-          currentDir === "asc" ? (
-            <ChevronUp className="w-3.5 h-3.5 text-primary" />
-          ) : (
-            <ChevronDown className="w-3.5 h-3.5 text-primary" />
-          )
-        ) : (
-          <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />
-        )}
-      </div>
-    </th>
+      {label}
+      {isActive ? (
+        currentDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-primary" /> : <ChevronDown className="w-3.5 h-3.5 text-primary" />
+      ) : (
+        <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />
+      )}
+    </div>
   );
+}
+
+const COL = { title: 360, type: 100, depth: 64, created: 100, updated: 100, link: 64 };
+const ROW_HEIGHT = 38;
+const OVERSCAN = 5; // extra rows above/below viewport
+
+// ─── Virtual Scroll Hook ──────────────────────────────────────────────────────
+function useVirtualScroll(itemCount: number, itemHeight: number, containerHeight: number) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const startIndex = Math.max(0, Math.floor(scrollTop / itemHeight) - OVERSCAN);
+  const visibleCount = Math.ceil(containerHeight / itemHeight) + OVERSCAN * 2;
+  const endIndex = Math.min(itemCount - 1, startIndex + visibleCount);
+
+  const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    setScrollTop(e.currentTarget.scrollTop);
+  }, []);
+
+  const scrollToTop = useCallback(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    setScrollTop(0);
+  }, []);
+
+  return {
+    scrollRef,
+    startIndex,
+    endIndex,
+    totalHeight: itemCount * itemHeight,
+    offsetY: startIndex * itemHeight,
+    onScroll,
+    scrollToTop,
+  };
 }
 
 interface WikiTableProps {
@@ -92,235 +129,163 @@ interface WikiTableProps {
   onSearchChange: (q: string) => void;
 }
 
-const PAGE_SIZE = 50;
+const TABLE_HEIGHT = 520;
 
 export function WikiTable({ nodes, searchQuery, onSearchChange }: WikiTableProps) {
   const [sortField, setSortField] = useState<SortField>("depth");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
-  const [page, setPage] = useState(1);
 
-  const handleSort = (field: SortField) => {
-    if (sortField === field) {
-      setSortDir(d => (d === "asc" ? "desc" : "asc"));
-    } else {
-      setSortField(field);
+  const handleSort = useCallback((field: SortField) => {
+    setSortField(prev => {
+      if (prev === field) {
+        setSortDir(d => (d === "asc" ? "desc" : "asc"));
+        return prev;
+      }
       setSortDir("asc");
-    }
-    setPage(1);
-  };
+      return field;
+    });
+  }, []);
 
   const filtered = useMemo(() => {
     if (!searchQuery) return nodes;
     const q = searchQuery.toLowerCase();
-    return nodes.filter(
-      n =>
-        n.title?.toLowerCase().includes(q) ||
-        n.obj_type?.toLowerCase().includes(q) ||
-        n.url?.toLowerCase().includes(q)
+    return nodes.filter(n =>
+      n.title?.toLowerCase().includes(q) ||
+      n.obj_type?.toLowerCase().includes(q) ||
+      n.url?.toLowerCase().includes(q)
     );
   }, [nodes, searchQuery]);
 
   const sorted = useMemo(() => {
     return [...filtered].sort((a, b) => {
       let cmp = 0;
-      if (sortField === "title") {
-        cmp = (a.title ?? "").localeCompare(b.title ?? "");
-      } else if (sortField === "obj_type") {
-        cmp = (a.obj_type ?? "").localeCompare(b.obj_type ?? "");
-      } else if (sortField === "depth") {
-        cmp = (a.depth ?? 0) - (b.depth ?? 0);
-      } else if (sortField === "obj_create_time") {
-        cmp = parseInt(a.obj_create_time ?? "0") - parseInt(b.obj_create_time ?? "0");
-      } else if (sortField === "obj_edit_time") {
-        cmp = parseInt(a.obj_edit_time ?? "0") - parseInt(b.obj_edit_time ?? "0");
-      }
+      if (sortField === "title") cmp = (a.title ?? "").localeCompare(b.title ?? "");
+      else if (sortField === "obj_type") cmp = (a.obj_type ?? "").localeCompare(b.obj_type ?? "");
+      else if (sortField === "depth") cmp = (a.depth ?? 0) - (b.depth ?? 0);
+      else if (sortField === "obj_create_time") cmp = parseInt(a.obj_create_time ?? "0") - parseInt(b.obj_create_time ?? "0");
+      else if (sortField === "obj_edit_time") cmp = parseInt(a.obj_edit_time ?? "0") - parseInt(b.obj_edit_time ?? "0");
       return sortDir === "asc" ? cmp : -cmp;
     });
   }, [filtered, sortField, sortDir]);
 
-  const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
-  const paginated = sorted.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const { scrollRef, startIndex, endIndex, totalHeight, offsetY, onScroll, scrollToTop } = useVirtualScroll(
+    sorted.length,
+    ROW_HEIGHT,
+    TABLE_HEIGHT
+  );
 
-  function highlightText(text: string): React.ReactNode {
-    if (!searchQuery) return text;
-    const parts = text.split(new RegExp(`(${searchQuery})`, "gi"));
-    return parts.map((part, i) =>
-      part.toLowerCase() === searchQuery.toLowerCase() ? (
-        <mark key={i} className="bg-yellow-200 dark:bg-yellow-800 text-inherit rounded-sm px-0.5">
-          {part}
-        </mark>
-      ) : (
-        part
-      )
-    );
-  }
+  // Reset scroll on search/sort change
+  useEffect(() => { scrollToTop(); }, [searchQuery, sortField, sortDir, scrollToTop]);
+
+  const visibleRows = sorted.slice(startIndex, endIndex + 1);
 
   return (
-    <div className="flex flex-col gap-3 h-full">
-      {/* Search bar */}
+    <div className="flex flex-col gap-3">
+      {/* Search */}
       <div className="flex items-center gap-2">
-        <Input
-          placeholder="Search by title, type, or URL..."
-          value={searchQuery}
-          onChange={e => {
-            onSearchChange(e.target.value);
-            setPage(1);
-          }}
-          className="h-8 text-sm"
-        />
-        {searchQuery && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 px-2 text-xs"
-            onClick={() => onSearchChange("")}
-          >
-            Clear
-          </Button>
-        )}
-        <span className="text-xs text-muted-foreground whitespace-nowrap">
-          {filtered.length} / {nodes.length} results
+        <div className="relative flex-1">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+          <Input
+            placeholder="Search by title, type, or URL..."
+            value={searchQuery}
+            onChange={e => onSearchChange(e.target.value)}
+            className="h-8 text-sm pl-8"
+          />
+          {searchQuery && (
+            <button className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onClick={() => onSearchChange("")}>
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+        <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0">
+          {filtered.length.toLocaleString()} / {nodes.length.toLocaleString()} results
         </span>
       </div>
 
       {/* Table */}
-      <div className="flex-1 overflow-auto rounded-md border border-border">
-        <table className="w-full text-sm border-collapse">
-          <thead className="sticky top-0 bg-muted/80 backdrop-blur-sm z-10">
-            <tr className="border-b border-border">
-              <SortHeader label="Title" field="title" currentField={sortField} currentDir={sortDir} onSort={handleSort} className="min-w-[200px]" />
-              <SortHeader label="Type" field="obj_type" currentField={sortField} currentDir={sortDir} onSort={handleSort} className="w-24" />
-              <SortHeader label="Depth" field="depth" currentField={sortField} currentDir={sortDir} onSort={handleSort} className="w-16" />
-              <SortHeader label="Created" field="obj_create_time" currentField={sortField} currentDir={sortDir} onSort={handleSort} className="w-28" />
-              <SortHeader label="Updated" field="obj_edit_time" currentField={sortField} currentDir={sortDir} onSort={handleSort} className="w-28" />
-              <th className="px-3 py-2.5 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider w-16">Link</th>
-            </tr>
-          </thead>
-          <tbody>
-            {paginated.length === 0 ? (
-              <tr>
-                <td colSpan={6} className="py-12 text-center text-muted-foreground text-sm">
-                  No results found
-                </td>
-              </tr>
-            ) : (
-              paginated.map((node, idx) => (
-                <tr
-                  key={node.node_token}
-                  className={cn(
-                    "border-b border-border/50 hover:bg-accent/40 transition-colors",
-                    idx % 2 === 0 ? "bg-background" : "bg-muted/20"
-                  )}
-                >
-                  {/* Title */}
-                  <td className="px-3 py-2">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className="inline-block w-px bg-border flex-shrink-0"
-                        style={{ height: "16px", marginLeft: `${(node.depth ?? 0) * 12}px` }}
-                      />
-                      <span className="truncate max-w-[300px] font-medium text-foreground" title={node.title}>
-                        {highlightText(node.title || "(Untitled)")}
-                      </span>
-                    </div>
-                  </td>
+      <div className="rounded-md border border-border overflow-hidden">
+        {/* Sticky Header */}
+        <div className="flex items-center bg-muted/80 border-b border-border" style={{ height: ROW_HEIGHT }}>
+          <SortHeader label="Title" field="title" currentField={sortField} currentDir={sortDir} onSort={handleSort} style={{ width: COL.title, minWidth: COL.title }} />
+          <SortHeader label="Type" field="obj_type" currentField={sortField} currentDir={sortDir} onSort={handleSort} style={{ width: COL.type, minWidth: COL.type }} />
+          <SortHeader label="Depth" field="depth" currentField={sortField} currentDir={sortDir} onSort={handleSort} style={{ width: COL.depth, minWidth: COL.depth }} />
+          <SortHeader label="Created" field="obj_create_time" currentField={sortField} currentDir={sortDir} onSort={handleSort} style={{ width: COL.created, minWidth: COL.created }} />
+          <SortHeader label="Updated" field="obj_edit_time" currentField={sortField} currentDir={sortDir} onSort={handleSort} style={{ width: COL.updated, minWidth: COL.updated }} />
+          <div className="px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider" style={{ width: COL.link, minWidth: COL.link }}>Link</div>
+        </div>
 
-                  {/* Type */}
-                  <td className="px-3 py-2">
-                    <span
+        {/* Scrollable body */}
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          style={{ height: TABLE_HEIGHT, overflowY: "auto", overflowX: "auto", position: "relative" }}
+        >
+          {sorted.length === 0 ? (
+            <div className="flex items-center justify-center h-full text-muted-foreground text-sm">No results found</div>
+          ) : (
+            /* Total height spacer + positioned rows */
+            <div style={{ height: totalHeight, position: "relative" }}>
+              <div style={{ transform: `translateY(${offsetY}px)` }}>
+                {visibleRows.map((node, i) => {
+                  const actualIndex = startIndex + i;
+                  const isEven = actualIndex % 2 === 0;
+                  return (
+                    <div
+                      key={node.node_token || actualIndex}
                       className={cn(
-                        "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium",
-                        typeBadgeMap[node.obj_type] ?? typeBadgeMap.file
+                        "flex items-center border-b border-border/50 hover:bg-accent/40 transition-colors",
+                        isEven ? "bg-background" : "bg-muted/20"
                       )}
+                      style={{ height: ROW_HEIGHT }}
                     >
-                      {typeIconMap[node.obj_type] ?? typeIconMap.file}
-                      {node.obj_type}
-                    </span>
-                  </td>
-
-                  {/* Depth */}
-                  <td className="px-3 py-2 text-center">
-                    <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
-                      L{node.depth ?? 0}
-                    </span>
-                  </td>
-
-                  {/* Created */}
-                  <td className="px-3 py-2 text-xs text-muted-foreground">
-                    {formatTimestamp(node.obj_create_time)}
-                  </td>
-
-                  {/* Updated */}
-                  <td className="px-3 py-2 text-xs text-muted-foreground">
-                    {formatTimestamp(node.obj_edit_time)}
-                  </td>
-
-                  {/* Link */}
-                  <td className="px-3 py-2">
-                    {node.url ? (
-                      <a
-                        href={node.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
-                      >
-                        <ExternalLink className="w-3 h-3" />
-                        Open
-                      </a>
-                    ) : (
-                      <span className="text-muted-foreground text-xs">-</span>
-                    )}
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+                      {/* Title */}
+                      <div className="px-3 flex items-center gap-1.5 overflow-hidden" style={{ width: COL.title, minWidth: COL.title }}>
+                        <span className="inline-block w-0.5 h-4 bg-border/60 flex-shrink-0 rounded" style={{ marginLeft: `${(node.depth ?? 0) * 10}px` }} />
+                        <span className="truncate font-medium text-foreground text-xs" title={node.title}>
+                          {searchQuery ? highlightText(node.title || "(Untitled)", searchQuery) : (node.title || "(Untitled)")}
+                        </span>
+                      </div>
+                      {/* Type */}
+                      <div className="px-3 flex items-center" style={{ width: COL.type, minWidth: COL.type }}>
+                        <span className={cn("inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium", typeBadgeMap[node.obj_type] ?? typeBadgeMap.file)}>
+                          {typeIconMap[node.obj_type] ?? typeIconMap.file}
+                          {node.obj_type}
+                        </span>
+                      </div>
+                      {/* Depth */}
+                      <div className="px-3 flex items-center justify-center" style={{ width: COL.depth, minWidth: COL.depth }}>
+                        <span className="text-xs text-muted-foreground bg-muted px-1.5 py-0.5 rounded">L{node.depth ?? 0}</span>
+                      </div>
+                      {/* Created */}
+                      <div className="px-3 text-xs text-muted-foreground" style={{ width: COL.created, minWidth: COL.created }}>
+                        {formatTimestamp(node.obj_create_time)}
+                      </div>
+                      {/* Updated */}
+                      <div className="px-3 text-xs text-muted-foreground" style={{ width: COL.updated, minWidth: COL.updated }}>
+                        {formatTimestamp(node.obj_edit_time)}
+                      </div>
+                      {/* Link */}
+                      <div className="px-3 flex items-center" style={{ width: COL.link, minWidth: COL.link }}>
+                        {node.url ? (
+                          <a href={node.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline text-xs">
+                            <ExternalLink className="w-3 h-3" />Open
+                          </a>
+                        ) : <span className="text-muted-foreground text-xs">-</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between text-xs text-muted-foreground">
-          <span>
-            Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, sorted.length)} of {sorted.length}
-          </span>
-          <div className="flex items-center gap-1">
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 px-2 text-xs"
-              disabled={page === 1}
-              onClick={() => setPage(p => p - 1)}
-            >
-              Prev
-            </Button>
-            {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
-              const p = i + 1;
-              return (
-                <Button
-                  key={p}
-                  variant={page === p ? "default" : "outline"}
-                  size="sm"
-                  className="h-7 w-7 p-0 text-xs"
-                  onClick={() => setPage(p)}
-                >
-                  {p}
-                </Button>
-              );
-            })}
-            {totalPages > 7 && <span>...</span>}
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 px-2 text-xs"
-              disabled={page === totalPages}
-              onClick={() => setPage(p => p + 1)}
-            >
-              Next
-            </Button>
-          </div>
-        </div>
-      )}
+      {/* Footer */}
+      <div className="flex items-center justify-between text-xs text-muted-foreground">
+        <span>{sorted.length.toLocaleString()} rows {searchQuery ? `(filtered from ${nodes.length.toLocaleString()})` : ""}</span>
+        <span>Virtual scroll — renders only visible rows for performance</span>
+      </div>
     </div>
   );
 }

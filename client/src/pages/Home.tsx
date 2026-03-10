@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import {
   Link2,
   Download,
@@ -16,6 +16,8 @@ import {
   ExternalLink,
   ChevronDown,
   ChevronUp,
+  Zap,
+  AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +26,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
+import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 import { trpc } from "@/lib/trpc";
 import { WikiTreeView, type WikiNode } from "@/components/WikiTreeView";
@@ -105,18 +108,150 @@ function CredentialsGuide() {
           </div>
           <Separator />
           <div>
-            <p className="font-semibold text-foreground mb-1.5">Option B — User Access Token (quick test)</p>
+            <p className="font-semibold text-foreground mb-1.5">Option B — User Access Token (quick test, expires in 2h)</p>
             <ol className="space-y-1 text-muted-foreground list-decimal list-inside">
-              <li>Go to <a href="https://open.feishu.cn/api-explorer/cli_a5b3f3b3b3b3b3b3" target="_blank" rel="noopener noreferrer" className="text-blue-600 underline inline-flex items-center gap-0.5">Feishu API Explorer <ExternalLink className="w-2.5 h-2.5" /></a></li>
-              <li>Log in with your Feishu account</li>
-              <li>Copy the <strong className="text-foreground">User Access Token</strong> shown at the top</li>
+              <li>Go to <a href="https://open.feishu.cn/api-explorer" target="_blank" rel="noopener noreferrer" className="text-blue-600 underline inline-flex items-center gap-0.5">Feishu API Explorer <ExternalLink className="w-2.5 h-2.5" /></a></li>
+              <li>Log in with your Feishu account and select your app</li>
+              <li>Click <strong className="text-foreground">Get Token</strong> → choose <strong className="text-foreground">user_access_token</strong></li>
+              <li>Authorize and copy the token shown</li>
             </ol>
-            <p className="text-amber-600 dark:text-amber-400 mt-1.5">⚠ User tokens expire after 2 hours.</p>
+            <p className="text-amber-600 dark:text-amber-400 mt-1.5">⚠ User tokens expire after 2 hours. Get a new one if you see a token expired error.</p>
           </div>
         </div>
       )}
     </div>
   );
+}
+
+// ─── Progress Display ─────────────────────────────────────────────────────────
+function CrawlProgress({ count, message, startTime }: { count: number; message: string; startTime: number }) {
+  const elapsed = Math.floor((Date.now() - startTime) / 1000);
+  const rate = elapsed > 0 ? Math.round(count / elapsed) : 0;
+
+  return (
+    <Card className="shadow-sm border-primary/20">
+      <CardContent className="py-6 flex flex-col items-center gap-4">
+        <div className="flex items-center gap-3">
+          <Loader2 className="w-6 h-6 animate-spin text-primary" />
+          <div>
+            <p className="text-sm font-semibold text-foreground">{message}</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {elapsed}s elapsed{rate > 0 ? ` · ~${rate} nodes/sec` : ""}
+            </p>
+          </div>
+        </div>
+        {count > 0 && (
+          <div className="w-full max-w-md space-y-2">
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">{count.toLocaleString()} nodes found</span>
+              <span className="flex items-center gap-1"><Zap className="w-3 h-3 text-yellow-500" />Concurrent BFS</span>
+            </div>
+            <Progress value={Math.min((count / 200) % 100, 99)} className="h-1.5" />
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ─── SSE Crawl Hook ───────────────────────────────────────────────────────────
+interface CrawlResult {
+  spaceId: string;
+  domain: string;
+  totalCount: number;
+  nodes: WikiNode[];
+  tree: WikiNode[];
+  treeAvailable: boolean;
+}
+
+function useSseCrawl() {
+  const [isLoading, setIsLoading] = useState(false);
+  const [progressCount, setProgressCount] = useState(0);
+  const [progressMessage, setProgressMessage] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<CrawlResult | null>(null);
+  const [startTime, setStartTime] = useState(0);
+  const esRef = useRef<EventSource | null>(null);
+
+  const crawl = useCallback((params: {
+    url: string;
+    appId?: string;
+    appSecret?: string;
+    userAccessToken?: string;
+  }) => {
+    // Abort previous
+    if (esRef.current) {
+      esRef.current.close();
+      esRef.current = null;
+    }
+
+    setIsLoading(true);
+    setError(null);
+    setResult(null);
+    setProgressCount(0);
+    setProgressMessage("Connecting...");
+    setStartTime(Date.now());
+
+    const qs = new URLSearchParams();
+    qs.set("url", params.url);
+    if (params.userAccessToken) qs.set("userAccessToken", params.userAccessToken);
+    if (params.appId) qs.set("appId", params.appId);
+    if (params.appSecret) qs.set("appSecret", params.appSecret);
+
+    const es = new EventSource(`/api/wiki/crawl-stream?${qs.toString()}`);
+    esRef.current = es;
+
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === "progress") {
+          setProgressCount(data.count ?? 0);
+          setProgressMessage(data.message ?? "");
+        } else if (data.type === "done") {
+          setResult({
+            spaceId: data.spaceId,
+            domain: data.domain,
+            totalCount: data.totalCount,
+            nodes: data.nodes as WikiNode[],
+            tree: data.tree as WikiNode[],
+            treeAvailable: data.treeAvailable ?? true,
+          });
+          setIsLoading(false);
+          es.close();
+          esRef.current = null;
+        } else if (data.type === "error") {
+          setError(data.message ?? "Unknown error");
+          setIsLoading(false);
+          es.close();
+          esRef.current = null;
+        }
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    es.onerror = () => {
+      if (esRef.current) {
+        setError("Connection lost. Please try again.");
+        setIsLoading(false);
+        es.close();
+        esRef.current = null;
+      }
+    };
+  }, []);
+
+  const abort = useCallback(() => {
+    if (esRef.current) {
+      esRef.current.close();
+      esRef.current = null;
+    }
+    setIsLoading(false);
+  }, []);
+
+  // Cleanup on unmount
+  useEffect(() => () => { esRef.current?.close(); }, []);
+
+  return { crawl, abort, isLoading, progressCount, progressMessage, error, result, startTime };
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -127,43 +262,32 @@ export default function Home() {
   const [userToken, setUserToken] = useState("");
   const [showSecret, setShowSecret] = useState(false);
   const [authMode, setAuthMode] = useState<"app" | "token">("app");
-
-  const [nodes, setNodes] = useState<WikiNode[]>([]);
-  const [tree, setTree] = useState<WikiNode[]>([]);
-  const [spaceId, setSpaceId] = useState("");
-  const [domain, setDomain] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState("tree");
 
-  const crawlMutation = trpc.wiki.crawl.useMutation({
-    onSuccess: (data) => {
-      setNodes(data.nodes as WikiNode[]);
-      setTree(data.tree as WikiNode[]);
-      setSpaceId(data.spaceId);
-      setDomain(data.domain);
-    },
-  });
-
+  const { crawl, abort, isLoading, progressCount, progressMessage, error, result, startTime } = useSseCrawl();
   const testAuthMutation = trpc.wiki.testAuth.useMutation();
 
   const handleCrawl = useCallback(() => {
     if (!wikiUrl.trim()) return;
-    crawlMutation.mutate({
+    crawl({
       url: wikiUrl.trim(),
       appId: authMode === "app" ? appId.trim() || undefined : undefined,
       appSecret: authMode === "app" ? appSecret.trim() || undefined : undefined,
       userAccessToken: authMode === "token" ? userToken.trim() || undefined : undefined,
     });
-  }, [wikiUrl, appId, appSecret, userToken, authMode, crawlMutation]);
+  }, [wikiUrl, appId, appSecret, userToken, authMode, crawl]);
 
   const handleExportCsv = useCallback(() => {
-    if (!nodes.length) return;
-    exportToCsv(nodes, `feishu_wiki_${spaceId || "export"}_${new Date().toISOString().slice(0, 10)}.csv`);
-  }, [nodes, spaceId]);
+    if (!result?.nodes.length) return;
+    exportToCsv(
+      result.nodes,
+      `feishu_wiki_${result.spaceId || "export"}_${new Date().toISOString().slice(0, 10)}.csv`
+    );
+  }, [result]);
 
-  const hasResults = nodes.length > 0;
-  const isLoading = crawlMutation.isPending;
-  const error = crawlMutation.error;
+  const hasResults = !!result && result.nodes.length > 0;
+  const isLargeWiki = result && result.totalCount > 5000;
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -209,13 +333,19 @@ export default function Home() {
                 onKeyDown={e => e.key === "Enter" && handleCrawl()}
                 className="h-9 text-sm font-mono"
               />
-              <Button
-                onClick={handleCrawl}
-                disabled={isLoading || !wikiUrl.trim()}
-                className="h-9 px-4 gap-2 shrink-0"
-              >
-                {isLoading ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Crawling...</> : <><RefreshCw className="w-3.5 h-3.5" />Crawl</>}
-              </Button>
+              {isLoading ? (
+                <Button variant="destructive" onClick={abort} className="h-9 px-4 gap-2 shrink-0">
+                  <AlertCircle className="w-3.5 h-3.5" />Stop
+                </Button>
+              ) : (
+                <Button
+                  onClick={handleCrawl}
+                  disabled={!wikiUrl.trim()}
+                  className="h-9 px-4 gap-2 shrink-0"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />Crawl
+                </Button>
+              )}
             </div>
 
             {/* Auth mode tabs */}
@@ -287,19 +417,13 @@ export default function Home() {
         {error && (
           <Alert variant="destructive" className="py-3">
             <AlertCircle className="w-4 h-4" />
-            <AlertDescription className="text-sm whitespace-pre-wrap ml-1">{error.message}</AlertDescription>
+            <AlertDescription className="text-sm whitespace-pre-wrap ml-1">{error}</AlertDescription>
           </Alert>
         )}
 
-        {/* Loading */}
+        {/* Loading with real-time progress */}
         {isLoading && (
-          <Card className="shadow-sm">
-            <CardContent className="py-10 flex flex-col items-center gap-3">
-              <Loader2 className="w-8 h-8 animate-spin text-primary" />
-              <p className="text-sm font-medium">Fetching wiki nodes via Feishu API...</p>
-              <p className="text-xs text-muted-foreground">Recursively fetching all child nodes. Large wikis may take a moment.</p>
-            </CardContent>
-          </Card>
+          <CrawlProgress count={progressCount} message={progressMessage} startTime={startTime} />
         )}
 
         {/* Results */}
@@ -309,25 +433,39 @@ export default function Home() {
               <div className="flex items-center gap-3 flex-wrap">
                 <div className="flex items-center gap-1.5">
                   <CheckCircle2 className="w-4 h-4 text-green-500" />
-                  <span className="text-sm font-semibold">{nodes.length} pages found</span>
+                  <span className="text-sm font-semibold">{result.nodes.length.toLocaleString()} pages found</span>
                 </div>
                 <Separator orientation="vertical" className="h-4" />
-                <span className="text-xs text-muted-foreground font-mono">{domain}</span>
+                <span className="text-xs text-muted-foreground font-mono">{result.domain}</span>
                 <Separator orientation="vertical" className="h-4" />
-                <span className="text-xs text-muted-foreground">Space: <code className="font-mono">{spaceId}</code></span>
+                <span className="text-xs text-muted-foreground">Space: <code className="font-mono">{result.spaceId}</code></span>
               </div>
               <div className="flex items-center gap-2">
-                <TypeStats nodes={nodes} />
+                <TypeStats nodes={result.nodes} />
                 <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={handleExportCsv}>
                   <Download className="w-3 h-3" /> CSV
                 </Button>
               </div>
             </div>
 
+            {/* Large wiki warning */}
+            {isLargeWiki && (
+              <Alert className="py-2 border-amber-200 bg-amber-50 dark:bg-amber-900/10">
+                <AlertTriangle className="w-4 h-4 text-amber-600" />
+                <AlertDescription className="text-xs text-amber-700 dark:text-amber-400 ml-1">
+                  Large wiki ({result.totalCount.toLocaleString()} nodes). Tree view is disabled for performance — use Table View with search/filter instead. CSV export includes all nodes.
+                </AlertDescription>
+              </Alert>
+            )}
+
             <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col">
               <TabsList className="w-fit h-8">
-                <TabsTrigger value="tree" className="text-xs gap-1.5 h-7 px-3"><TreePine className="w-3.5 h-3.5" />Tree View</TabsTrigger>
-                <TabsTrigger value="table" className="text-xs gap-1.5 h-7 px-3"><Table2 className="w-3.5 h-3.5" />Table View</TabsTrigger>
+                <TabsTrigger value="tree" className="text-xs gap-1.5 h-7 px-3" disabled={!!isLargeWiki}>
+                  <TreePine className="w-3.5 h-3.5" />Tree View {isLargeWiki && "(disabled)"}
+                </TabsTrigger>
+                <TabsTrigger value="table" className="text-xs gap-1.5 h-7 px-3">
+                  <Table2 className="w-3.5 h-3.5" />Table View
+                </TabsTrigger>
               </TabsList>
 
               <TabsContent value="tree" className="flex-1 mt-3">
@@ -341,7 +479,7 @@ export default function Home() {
                     </div>
                   </CardHeader>
                   <CardContent className="px-2 pb-4 overflow-auto max-h-[600px]">
-                    <WikiTreeView tree={tree} searchQuery={searchQuery} />
+                    <WikiTreeView tree={result.tree} searchQuery={searchQuery} />
                   </CardContent>
                 </Card>
               </TabsContent>
@@ -349,7 +487,7 @@ export default function Home() {
               <TabsContent value="table" className="flex-1 mt-3">
                 <Card className="shadow-sm">
                   <CardContent className="pt-4 pb-4" style={{ minHeight: "500px" }}>
-                    <WikiTable nodes={nodes} searchQuery={searchQuery} onSearchChange={setSearchQuery} />
+                    <WikiTable nodes={result.nodes} searchQuery={searchQuery} onSearchChange={setSearchQuery} />
                   </CardContent>
                 </Card>
               </TabsContent>
@@ -373,8 +511,12 @@ export default function Home() {
               <div className="flex flex-col gap-1 text-xs text-muted-foreground bg-muted/50 rounded-lg px-4 py-3 text-left">
                 <p className="font-medium text-foreground mb-1">Example URLs:</p>
                 <code className="font-mono">https://waytoagi.feishu.cn/wiki/CCR4wl3upi6dF9kVE5YcAcGcnlU</code>
-                <code className="font-mono">https://company.feishu.cn/wiki/SPACE_TOKEN</code>
+                <code className="font-mono">https://waytoagi.feishu.cn/wiki/QPe5w5g7UisbEkkow8XcDmOpn8e</code>
                 <code className="font-mono">https://company.larksuite.com/wiki/SPACE_TOKEN</code>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground bg-green-50 dark:bg-green-900/10 rounded-lg px-4 py-2.5 border border-green-200 dark:border-green-800">
+                <Zap className="w-3.5 h-3.5 text-green-600 shrink-0" />
+                <span><strong className="text-green-700 dark:text-green-400">Optimized for large wikis:</strong> Concurrent BFS fetching handles 10,000+ nodes efficiently</span>
               </div>
             </CardContent>
           </Card>

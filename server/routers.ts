@@ -35,8 +35,8 @@ export const appRouter = router({
       }),
 
     /**
-     * Crawl all nodes from a Feishu wiki space using the official Feishu API.
-     * Requires either App ID + App Secret or a User Access Token.
+     * Crawl all nodes from a Feishu wiki space using concurrent BFS.
+     * Optimized for large wikis (10,000+ nodes).
      */
     crawl: publicProcedure
       .input(
@@ -50,21 +50,18 @@ export const appRouter = router({
       .mutation(async ({ input }) => {
         const { url, appId, appSecret, userAccessToken } = input;
 
-        // Parse the URL first
         const parsed = parseFeishuWikiUrl(url);
         if (!parsed.isValid) {
           throw new TRPCError({
             code: "BAD_REQUEST",
             message:
               "Invalid Feishu wiki URL. Please enter a valid URL like:\n" +
-              "https://xxx.feishu.cn/wiki/TOKEN\n" +
-              "https://xxx.larksuite.com/wiki/TOKEN",
+              "https://xxx.feishu.cn/wiki/TOKEN",
           });
         }
 
         const { domain, token } = parsed;
 
-        // Validate credentials are provided
         const hasAppCreds = appId && appSecret;
         const hasUserToken = userAccessToken && userAccessToken.trim().length > 0;
 
@@ -72,17 +69,10 @@ export const appRouter = router({
           throw new TRPCError({
             code: "UNAUTHORIZED",
             message:
-              "Feishu Wiki API requires authentication.\n\n" +
-              "How to get credentials:\n\n" +
-              "Option A — App Credentials (recommended for full access):\n" +
-              "  1. Visit https://open.feishu.cn/app → Create new app\n" +
-              "  2. Permissions & Scopes → enable: wiki:wiki:readonly\n" +
-              "  3. Publish the app version\n" +
-              "  4. Enter App ID + App Secret in the form\n\n" +
-              "Option B — User Access Token (quick test):\n" +
-              "  1. Visit https://open.feishu.cn/api-explorer\n" +
-              "  2. Log in → copy the User Access Token shown\n" +
-              "  3. Paste it in the User Access Token field",
+              "Authentication required. Please provide either:\n" +
+              "1. Feishu App ID + App Secret (for app-level access)\n" +
+              "2. User Access Token (for user-level access)\n\n" +
+              "For public wikis like waytoagi.feishu.cn, you still need app credentials to use the API.",
           });
         }
 
@@ -112,20 +102,28 @@ export const appRouter = router({
             spaceId = nodeInfo.space_id;
             rootNodeToken = nodeInfo.node_token;
           } else {
-            // token might already be a space_id
             spaceId = token;
           }
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes("TOKEN_EXPIRED")) {
+            throw new TRPCError({
+              code: "UNAUTHORIZED",
+              message:
+                "Your User Access Token has expired (tokens expire after 2 hours).\n\n" +
+                "Please get a new token:\n" +
+                "1. Go to https://open.feishu.cn/api-explorer\n" +
+                "2. Log in and click 'Get Token'\n" +
+                "3. Copy the new User Access Token and paste it here",
+            });
+          }
           throw new TRPCError({
             code: "FORBIDDEN",
-            message:
-              `Could not access wiki node: ${msg}\n\n` +
-              "Make sure your app has the 'wiki:wiki:readonly' permission and has been added to the wiki space.",
+            message: `Could not access wiki node: ${msg}`,
           });
         }
 
-        // Fetch all nodes recursively
+        // Fetch all nodes using concurrent BFS
         let allNodes;
         try {
           allNodes = await fetchAllNodes(
@@ -137,6 +135,17 @@ export const appRouter = router({
           );
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes("TOKEN_EXPIRED")) {
+            throw new TRPCError({
+              code: "UNAUTHORIZED",
+              message:
+                "Your User Access Token has expired (tokens expire after 2 hours).\n\n" +
+                "Please get a new token:\n" +
+                "1. Go to https://open.feishu.cn/api-explorer\n" +
+                "2. Log in and click 'Get Token'\n" +
+                "3. Copy the new User Access Token and paste it here",
+            });
+          }
           throw new TRPCError({
             code: "INTERNAL_SERVER_ERROR",
             message: `Failed to fetch wiki nodes: ${msg}`,
@@ -155,7 +164,8 @@ export const appRouter = router({
           });
         }
 
-        const tree = buildTree(allNodes);
+        // Only build tree for reasonable sizes to avoid memory issues
+        const tree = allNodes.length <= 5000 ? buildTree(allNodes) : [];
 
         return {
           spaceId,
@@ -163,6 +173,7 @@ export const appRouter = router({
           totalCount: allNodes.length,
           nodes: allNodes,
           tree,
+          treeAvailable: allNodes.length <= 5000,
           mode: "api" as const,
         };
       }),
