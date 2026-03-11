@@ -50,13 +50,18 @@ function generateJobId(): string {
 
 async function resolveAccessToken(
   userAccessToken?: string,
-  appId?: string,
-  appSecret?: string,
-  apiBase = "https://open.feishu.cn"
+  _appId?: string,
+  _appSecret?: string,
+  _apiBase = "https://open.feishu.cn"
 ): Promise<string> {
   if (userAccessToken?.trim()) return userAccessToken.trim();
-  if (appId && appSecret) return getTenantAccessToken(appId, appSecret, apiBase);
-  throw new Error("Authentication required. Please provide either App credentials or a User Access Token.");
+  // NOTE: App Token (tenant_access_token) does NOT have the docs:document.content:read scope
+  // required to read document content. Only User Access Token works for this API.
+  throw new Error(
+    "Markdown export requires a User Access Token (not App credentials). " +
+    "App tokens lack the docs:document.content:read scope. " +
+    "Please switch to 'User Access Token' tab and provide a valid token."
+  );
 }
 
 /** Fetch markdown content of a single docx via Feishu docs/v1/content API */

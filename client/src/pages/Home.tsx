@@ -748,9 +748,10 @@ export default function Home() {
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-7 gap-1.5 text-xs border-violet-300 text-violet-700 hover:bg-violet-50 dark:border-violet-700 dark:text-violet-400"
-                  onClick={handleExportMarkdown}
-                  disabled={mdExportStatus === "running"}
+                  className="h-7 gap-1.5 text-xs border-violet-300 text-violet-700 hover:bg-violet-50 dark:border-violet-700 dark:text-violet-400 disabled:opacity-50"
+                  onClick={authMode === "app" ? undefined : handleExportMarkdown}
+                  disabled={mdExportStatus === "running" || authMode === "app"}
+                  title={authMode === "app" ? "MD export requires User Access Token (App credentials lack docs:document.content:read scope). Switch to User Access Token tab." : "Export all docx pages as Markdown ZIP"}
                 >
                   {mdExportStatus === "running" ? (
                     <Loader2 className="w-3 h-3 animate-spin" />
@@ -761,6 +762,8 @@ export default function Home() {
                     ? `Exporting... ${mdExportProgress.done}/${mdExportProgress.total}`
                     : mdExportStatus === "done"
                     ? "MD (ZIP) ✓"
+                    : authMode === "app"
+                    ? "MD (ZIP) ⚠"
                     : "MD (ZIP)"}
                 </Button>
                 {mdExportStatus === "done" && (
@@ -770,6 +773,16 @@ export default function Home() {
                 )}
               </div>
             </div>
+
+            {/* MD Export - App mode warning */}
+            {authMode === "app" && result && (
+              <Alert className="py-2 border-amber-200 bg-amber-50 dark:bg-amber-900/10">
+                <AlertTriangle className="w-4 h-4 text-amber-600" />
+                <AlertDescription className="text-xs text-amber-700 dark:text-amber-400 ml-1">
+                  <strong>MD export requires User Access Token.</strong> App credentials (tenant token) lack the <code className="font-mono bg-amber-100 dark:bg-amber-900/30 px-1 rounded">docs:document.content:read</code> scope. Switch to the <strong>User Access Token</strong> tab above and enter a valid token to enable MD export.
+                </AlertDescription>
+              </Alert>
+            )}
 
             {/* MD Export Progress */}
             {mdExportStatus === "running" && (

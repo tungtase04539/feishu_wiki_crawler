@@ -112,3 +112,10 @@
 - [x] UI: progress bar hiển thị tiến trình export (X/Y docs, rate limit info)
 - [x] UI: auto-download ZIP khi export hoàn thành, có nút Re-download
 - [x] UI: hiển thị error + Retry button khi export thất bại
+
+## Bug Fix - MD Export
+
+- [x] Debug lỗi tải file MD - lỗi 99991672: app thiếu scope docs:document.content:read
+- [x] Fix: export route chỉ chấp nhận User Access Token, throw lỗi rõ ràng nếu dùng App Token
+- [x] Fix: UI disable nút MD (ZIP) và hiển thị warning khi authMode=app
+- [x] Fix: thêm inline warning alert giải thích lý do và hướng dẫn switch sang User Access Token
