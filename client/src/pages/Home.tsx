@@ -37,7 +37,7 @@ import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 import { trpc } from "@/lib/trpc";
 import { WikiTreeView, type WikiNode } from "@/components/WikiTreeView";
-import { WikiTable } from "@/components/WikiTable";
+import { WikiTable, type WikiTableAuthInfo } from "@/components/WikiTable";
 
 // ─── CSV Export ──────────────────────────────────────────────────────────────
 function exportToCsv(nodes: WikiNode[], filename = "feishu_wiki_links.csv") {
@@ -875,7 +875,17 @@ export default function Home() {
               <TabsContent value="table" className="flex-1 mt-3">
                 <Card className="shadow-sm">
                   <CardContent className="pt-4 pb-4" style={{ minHeight: "500px" }}>
-                    <WikiTable nodes={result.nodes} searchQuery={searchQuery} onSearchChange={setSearchQuery} />
+                    <WikiTable
+                      nodes={result.nodes}
+                      searchQuery={searchQuery}
+                      onSearchChange={setSearchQuery}
+                      authInfo={{
+                        userAccessToken: authMode === "token" ? userToken.trim() || undefined : undefined,
+                        appId: authMode === "app" ? appId.trim() || undefined : undefined,
+                        appSecret: authMode === "app" ? appSecret.trim() || undefined : undefined,
+                        apiBase: result.domain?.includes("larksuite.com") ? "https://open.larksuite.com" : "https://open.feishu.cn",
+                      } satisfies WikiTableAuthInfo}
+                    />
                   </CardContent>
                 </Card>
               </TabsContent>

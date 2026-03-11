@@ -347,4 +347,56 @@ export function registerWikiExportRoute(app: Express) {
     res.setHeader("Content-Length", job.zipBuffer.length);
     res.send(job.zipBuffer);
   });
+
+  // ─── Download single node Markdown ─────────────────────────────────────────────────────────────────────────────────
+  // GET /api/wiki/export/single?objToken=...&title=...&userAccessToken=...&apiBase=...
+  // Downloads a single docx page as a .md file directly (no ZIP, no job queue).
+  app.get("/api/wiki/export/single", async (req: Request, res: Response) => {
+    const {
+      objToken,
+      title,
+      userAccessToken,
+      appId,
+      appSecret,
+      apiBase: apiBaseParam,
+    } = req.query as Record<string, string>;
+
+    if (!objToken) {
+      res.status(400).json({ error: "Missing objToken" });
+      return;
+    }
+
+    const apiBase = apiBaseParam ?? "https://open.feishu.cn";
+
+    // Resolve access token (user token only — app token lacks docs scope)
+    let accessToken: string;
+    try {
+      accessToken = await resolveAccessToken(userAccessToken, appId, appSecret, apiBase);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(401).json({ error: msg });
+      return;
+    }
+
+    // Fetch markdown content from Feishu API
+    let content: string;
+    try {
+      content = await fetchDocxMarkdown(objToken, accessToken, apiBase);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ error: `Failed to fetch markdown: ${msg}` });
+      return;
+    }
+
+    // Add frontmatter with metadata
+    const safeTitle = title ?? objToken;
+    const frontmatter = `---\ntitle: "${safeTitle.replace(/"/g, '\\"')}"\n---\n\n`;
+    const fullContent = frontmatter + content;
+
+    // Build safe filename
+    const safeFilename = sanitizeFilename(safeTitle) + ".md";
+    res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(safeFilename)}`);
+    res.send(fullContent);
+  });
 }

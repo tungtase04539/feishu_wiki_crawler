@@ -11,6 +11,8 @@ import {
   File,
   Search,
   X,
+  Download,
+  Loader2,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -90,7 +92,7 @@ function SortHeader({ label, field, currentField, currentDir, onSort, style }: S
   );
 }
 
-const COL = { title: 360, type: 100, depth: 64, created: 100, updated: 100, link: 64 };
+const COL = { title: 320, type: 100, depth: 64, created: 100, updated: 100, link: 64, md: 80 };
 const ROW_HEIGHT = 38;
 const OVERSCAN = 5; // extra rows above/below viewport
 
@@ -123,17 +125,76 @@ function useVirtualScroll(itemCount: number, itemHeight: number, containerHeight
   };
 }
 
+export interface WikiTableAuthInfo {
+  userAccessToken?: string;
+  appId?: string;
+  appSecret?: string;
+  apiBase?: string;
+}
+
 interface WikiTableProps {
   nodes: WikiNode[];
   searchQuery: string;
   onSearchChange: (q: string) => void;
+  authInfo?: WikiTableAuthInfo;
 }
 
 const TABLE_HEIGHT = 520;
 
-export function WikiTable({ nodes, searchQuery, onSearchChange }: WikiTableProps) {
+export function WikiTable({ nodes, searchQuery, onSearchChange, authInfo }: WikiTableProps) {
   const [sortField, setSortField] = useState<SortField>("depth");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  // Track per-node download state
+  const [downloadState, setDownloadState] = useState<Record<string, "loading" | "done" | "error">>({});
+  const [downloadError, setDownloadError] = useState<Record<string, string>>({});
+
+  const hasAuth = !!(authInfo?.userAccessToken || (authInfo?.appId && authInfo?.appSecret));
+
+  const handleDownloadMd = useCallback(async (node: WikiNode) => {
+    const objToken = node.obj_token;
+    if (!objToken) return;
+    setDownloadState(prev => ({ ...prev, [objToken]: "loading" }));
+    setDownloadError(prev => { const n = { ...prev }; delete n[objToken]; return n; });
+    try {
+      const qs = new URLSearchParams();
+      qs.set("objToken", objToken);
+      if (node.title) qs.set("title", node.title);
+      if (authInfo?.userAccessToken) qs.set("userAccessToken", authInfo.userAccessToken);
+      if (authInfo?.appId) qs.set("appId", authInfo.appId);
+      if (authInfo?.appSecret) qs.set("appSecret", authInfo.appSecret);
+      if (authInfo?.apiBase) qs.set("apiBase", authInfo.apiBase);
+      const res = await fetch(`/api/wiki/export/single?${qs.toString()}`);
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(errJson.error ?? `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const disposition = res.headers.get("Content-Disposition") ?? "";
+      const filenameMatch = disposition.match(/filename\*?=(?:UTF-8'')?([^;]+)/i);
+      const rawFilename = filenameMatch?.[1]?.replace(/"/g, "") ?? `${node.title ?? objToken}.md`;
+      a.download = decodeURIComponent(rawFilename);
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setDownloadState(prev => ({ ...prev, [objToken]: "done" }));
+      setTimeout(() => {
+        setDownloadState(prev => { const n = { ...prev }; if (n[objToken] === "done") delete n[objToken]; return n; });
+      }, 3000);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setDownloadState(prev => ({ ...prev, [objToken]: "error" }));
+      setDownloadError(prev => ({ ...prev, [objToken]: msg }));
+      setTimeout(() => {
+        setDownloadState(prev => { const n = { ...prev }; delete n[objToken]; return n; });
+        setDownloadError(prev => { const n = { ...prev }; delete n[objToken]; return n; });
+      }, 5000);
+    }
+  }, [authInfo]);
 
   const handleSort = useCallback((field: SortField) => {
     setSortField(prev => {
@@ -215,6 +276,7 @@ export function WikiTable({ nodes, searchQuery, onSearchChange }: WikiTableProps
           <SortHeader label="Created" field="obj_create_time" currentField={sortField} currentDir={sortDir} onSort={handleSort} style={{ width: COL.created, minWidth: COL.created }} />
           <SortHeader label="Updated" field="obj_edit_time" currentField={sortField} currentDir={sortDir} onSort={handleSort} style={{ width: COL.updated, minWidth: COL.updated }} />
           <div className="px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider" style={{ width: COL.link, minWidth: COL.link }}>Link</div>
+          <div className="px-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider" style={{ width: COL.md, minWidth: COL.md }}>MD</div>
         </div>
 
         {/* Scrollable body */}
@@ -275,6 +337,44 @@ export function WikiTable({ nodes, searchQuery, onSearchChange }: WikiTableProps
                           </a>
                         ) : <span className="text-muted-foreground text-xs">-</span>}
                       </div>
+                      {/* MD Download */}
+                      {(() => {
+                        const objToken = node.obj_token;
+                        const isDocx = node.obj_type === "docx" || node.obj_type === "doc";
+                        const dlState = objToken ? downloadState[objToken] : undefined;
+                        const dlError = objToken ? downloadError[objToken] : undefined;
+                        return (
+                          <div className="px-2 flex items-center justify-center" style={{ width: COL.md, minWidth: COL.md }}>
+                            {isDocx && objToken ? (
+                              <button
+                                title={
+                                  !hasAuth ? "Requires User Access Token"
+                                  : dlState === "error" ? `Error: ${dlError}`
+                                  : dlState === "done" ? "Downloaded!"
+                                  : "Download as Markdown"
+                                }
+                                disabled={!hasAuth || dlState === "loading"}
+                                onClick={() => handleDownloadMd(node)}
+                                className={cn(
+                                  "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium transition-colors",
+                                  !hasAuth ? "text-muted-foreground/40 cursor-not-allowed"
+                                  : dlState === "loading" ? "text-blue-500 cursor-wait"
+                                  : dlState === "done" ? "text-green-600 bg-green-50 dark:bg-green-900/20"
+                                  : dlState === "error" ? "text-red-500 bg-red-50 dark:bg-red-900/20"
+                                  : "text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 hover:text-purple-700"
+                                )}
+                              >
+                                {dlState === "loading" ? <Loader2 className="w-3 h-3 animate-spin" />
+                                  : dlState === "done" ? <>✓ .md</>
+                                  : dlState === "error" ? <>✗ err</>
+                                  : <><Download className="w-3 h-3" />.md</>}
+                              </button>
+                            ) : (
+                              <span className="text-muted-foreground/30 text-xs">—</span>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   );
                 })}
