@@ -2,6 +2,7 @@
  * Wiki Export API endpoints.
  *
  * Exports Feishu/Lark docx pages to Markdown files and packages them as a ZIP.
+ * Files are organized into a hierarchical folder structure mirroring the wiki tree.
  *
  * POST /api/wiki/export/start
  *   → Starts a background export job, returns { jobId }
@@ -20,8 +21,7 @@
 import type { Express, Request, Response } from "express";
 import { getDb } from "./db";
 import { crawlNodes, crawlSessions } from "../drizzle/schema";
-import { eq, and } from "drizzle-orm";
-import { getTenantAccessToken } from "./feishuApi";
+import { eq } from "drizzle-orm";
 import archiver from "archiver";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -39,7 +39,6 @@ interface ExportJob {
 }
 
 // ─── In-memory job store ──────────────────────────────────────────────────────
-// For simplicity, export jobs are kept in memory (they're short-lived)
 const exportJobs = new Map<string, ExportJob>();
 
 function generateJobId(): string {
@@ -55,8 +54,6 @@ async function resolveAccessToken(
   _apiBase = "https://open.feishu.cn"
 ): Promise<string> {
   if (userAccessToken?.trim()) return userAccessToken.trim();
-  // NOTE: App Token (tenant_access_token) does NOT have the docs:document.content:read scope
-  // required to read document content. Only User Access Token works for this API.
   throw new Error(
     "Markdown export requires a User Access Token (not App credentials). " +
     "App tokens lack the docs:document.content:read scope. " +
@@ -92,12 +89,80 @@ async function fetchDocxMarkdown(
   return json.data?.content ?? "";
 }
 
-/** Sanitize a filename to be safe for ZIP */
-function sanitizeFilename(title: string): string {
-  return title
+/** Sanitize a path segment (folder or filename) to be safe for ZIP */
+export function sanitizeFilename(title: string): string {
+  return (title || "Untitled")
     .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
     .replace(/\s+/g, "_")
-    .slice(0, 100);
+    .replace(/^\.+/, "_")   // no leading dots
+    .replace(/_+/g, "_")    // collapse consecutive underscores
+    .slice(0, 80)
+    || "Untitled";
+}
+
+/**
+ * Build a map of nodeToken → full folder path for all nodes in a session.
+ *
+ * Algorithm:
+ *   1. Build a parent lookup: nodeToken → parentNodeToken
+ *   2. Build a title lookup: nodeToken → sanitized title
+ *   3. For each node, walk up the ancestor chain to build the path
+ *   4. Cache computed paths to avoid redundant traversal
+ *
+ * Example output:
+ *   "tokenA" → "Chapter_1"
+ *   "tokenB" → "Chapter_1/Section_1.1"
+ *   "tokenC" → "Chapter_2"
+ */
+export function buildNodePaths(
+  allNodes: Array<{
+    nodeToken: string;
+    parentNodeToken: string | null | undefined;
+    title: string | null | undefined;
+    objType: string | null | undefined;
+  }>
+): Map<string, string> {
+  // Build lookup maps
+  const parentMap = new Map<string, string | null>();
+  const titleMap = new Map<string, string>();
+
+  for (const node of allNodes) {
+    parentMap.set(node.nodeToken, node.parentNodeToken ?? null);
+    titleMap.set(node.nodeToken, sanitizeFilename(node.title ?? "Untitled"));
+  }
+
+  // Cache for computed paths
+  const pathCache = new Map<string, string>();
+
+  function getPath(token: string, visited = new Set<string>()): string {
+    if (pathCache.has(token)) return pathCache.get(token)!;
+
+    // Cycle guard
+    if (visited.has(token)) return "";
+    visited.add(token);
+
+    const parent = parentMap.get(token);
+    const title = titleMap.get(token) ?? "Untitled";
+
+    let path: string;
+    if (!parent || !parentMap.has(parent)) {
+      // Root node or parent not in session → place at top level
+      path = title;
+    } else {
+      const parentPath = getPath(parent, visited);
+      path = parentPath ? `${parentPath}/${title}` : title;
+    }
+
+    pathCache.set(token, path);
+    return path;
+  }
+
+  const result = new Map<string, string>();
+  for (const node of allNodes) {
+    result.set(node.nodeToken, getPath(node.nodeToken));
+  }
+
+  return result;
 }
 
 /** Sleep for ms milliseconds */
@@ -109,20 +174,25 @@ function sleep(ms: number): Promise<void> {
 
 async function runExportJob(
   job: ExportJob,
-  nodes: Array<{ objToken: string; title: string; depth: number; url: string }>,
+  nodes: Array<{
+    nodeToken: string;
+    objToken: string;
+    title: string;
+    depth: number;
+    url: string;
+    folderPath: string;  // pre-computed hierarchical path
+  }>,
   accessToken: string,
   apiBase: string
 ) {
-  const CONCURRENCY = 3; // Stay well under 5 req/sec rate limit
-  const DELAY_BETWEEN_BATCHES_MS = 800; // ~3.75 req/sec with concurrency=3
+  const CONCURRENCY = 3;
+  const DELAY_BETWEEN_BATCHES_MS = 800;
 
-  // Collect all markdown content: { path, content }
   const files: Array<{ path: string; content: string }> = [];
 
-  // Track title counts for deduplication
-  const titleCounts = new Map<string, number>();
+  // Track used paths for deduplication within same folder
+  const usedPaths = new Map<string, number>();
 
-  // Process in batches
   for (let i = 0; i < nodes.length; i += CONCURRENCY) {
     if (job.status === "failed") break;
 
@@ -133,16 +203,17 @@ async function runExportJob(
         try {
           const markdown = await fetchDocxMarkdown(node.objToken, accessToken, apiBase);
 
-          // Build a unique filename with depth prefix for organization
-          const baseName = sanitizeFilename(node.title || node.objToken);
-          const count = titleCounts.get(baseName) ?? 0;
-          titleCounts.set(baseName, count + 1);
-          const uniqueName = count === 0 ? baseName : `${baseName}_${count}`;
+          // Build full path: folderPath/filename.md
+          // folderPath already includes the node's own title as last segment,
+          // so we use it directly as the file path (just add .md extension).
+          const basePath = node.folderPath;
+          const count = usedPaths.get(basePath) ?? 0;
+          usedPaths.set(basePath, count + 1);
+          const uniquePath = count === 0 ? `${basePath}.md` : `${basePath}_${count}.md`;
 
-          // Add URL and title as frontmatter
           const frontmatter = `---\ntitle: "${(node.title || "").replace(/"/g, '\\"')}"\nurl: "${node.url}"\ndepth: ${node.depth}\n---\n\n`;
           files.push({
-            path: `${uniqueName}.md`,
+            path: uniquePath,
             content: frontmatter + markdown,
           });
 
@@ -151,12 +222,11 @@ async function runExportJob(
           const msg = err instanceof Error ? err.message : String(err);
           console.warn(`[Export] Failed to export ${node.objToken} (${node.title}): ${msg}`);
           job.failed++;
-          job.done++; // count as processed
+          job.done++;
         }
       })
     );
 
-    // Throttle between batches
     if (i + CONCURRENCY < nodes.length) {
       await sleep(DELAY_BETWEEN_BATCHES_MS);
     }
@@ -214,7 +284,7 @@ export function registerWikiExportRoute(app: Express) {
       return;
     }
 
-    // Get session to find apiBase
+    // Get session
     const sessions = await db
       .select()
       .from(crawlSessions)
@@ -239,16 +309,24 @@ export function registerWikiExportRoute(app: Express) {
       return;
     }
 
-    // Get all docx nodes from this session
+    // Get ALL nodes (not just docx) to build the full tree for path computation
     const allNodes = await db
       .select()
       .from(crawlNodes)
-      .where(and(eq(crawlNodes.sessionId, sessionId), eq(crawlNodes.objType, "docx")));
+      .where(eq(crawlNodes.sessionId, sessionId));
 
-    if (allNodes.length === 0) {
+    // Filter to exportable nodes (docx only for markdown)
+    const exportableNodes = allNodes.filter(
+      (n) => n.objType === "docx" && n.objToken != null
+    );
+
+    if (exportableNodes.length === 0) {
       res.status(404).json({ error: "No docx nodes found in this session" });
       return;
     }
+
+    // Build hierarchical paths for ALL nodes (needed for folder structure)
+    const nodePaths = buildNodePaths(allNodes);
 
     // Create job
     const jobId = generateJobId();
@@ -256,22 +334,22 @@ export function registerWikiExportRoute(app: Express) {
       jobId,
       sessionId,
       status: "running",
-      total: allNodes.length,
+      total: exportableNodes.length,
       done: 0,
       failed: 0,
       startedAt: Date.now(),
     };
     exportJobs.set(jobId, job);
 
-    // Map nodes to export format (filter out nodes with null objToken)
-    const exportNodes = allNodes
-      .filter((n) => n.objToken != null)
-      .map((n) => ({
-        objToken: n.objToken as string,
-        title: n.title ?? "Untitled",
-        depth: n.depth,
-        url: n.url ?? "",
-      }));
+    // Map exportable nodes with their computed folder paths
+    const exportNodes = exportableNodes.map((n) => ({
+      nodeToken: n.nodeToken,
+      objToken: n.objToken as string,
+      title: n.title ?? "Untitled",
+      depth: n.depth,
+      url: n.url ?? "",
+      folderPath: nodePaths.get(n.nodeToken) ?? sanitizeFilename(n.title ?? "Untitled"),
+    }));
 
     // Start background export
     runExportJob(job, exportNodes, accessToken, apiBase).catch((err: unknown) => {
@@ -283,8 +361,8 @@ export function registerWikiExportRoute(app: Express) {
 
     res.json({
       jobId,
-      total: allNodes.length,
-      message: `Export started for ${allNodes.length} docx files`,
+      total: exportableNodes.length,
+      message: `Export started for ${exportableNodes.length} docx files`,
     });
   });
 
@@ -348,9 +426,8 @@ export function registerWikiExportRoute(app: Express) {
     res.send(job.zipBuffer);
   });
 
-  // ─── Download single node Markdown ─────────────────────────────────────────────────────────────────────────────────
-  // GET /api/wiki/export/single?objToken=...&title=...&userAccessToken=...&apiBase=...
-  // Downloads a single docx page as a .md file directly (no ZIP, no job queue).
+  // ─── Download single node Markdown ────────────────────────────────────────
+
   app.get("/api/wiki/export/single", async (req: Request, res: Response) => {
     const {
       objToken,
@@ -368,7 +445,6 @@ export function registerWikiExportRoute(app: Express) {
 
     const apiBase = apiBaseParam ?? "https://open.feishu.cn";
 
-    // Resolve access token (user token only — app token lacks docs scope)
     let accessToken: string;
     try {
       accessToken = await resolveAccessToken(userAccessToken, appId, appSecret, apiBase);
@@ -378,7 +454,6 @@ export function registerWikiExportRoute(app: Express) {
       return;
     }
 
-    // Fetch markdown content from Feishu API
     let content: string;
     try {
       content = await fetchDocxMarkdown(objToken, accessToken, apiBase);
@@ -388,12 +463,10 @@ export function registerWikiExportRoute(app: Express) {
       return;
     }
 
-    // Add frontmatter with metadata
     const safeTitle = title ?? objToken;
     const frontmatter = `---\ntitle: "${safeTitle.replace(/"/g, '\\"')}"\n---\n\n`;
     const fullContent = frontmatter + content;
 
-    // Build safe filename
     const safeFilename = sanitizeFilename(safeTitle) + ".md";
     res.setHeader("Content-Type", "text/markdown; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(safeFilename)}`);

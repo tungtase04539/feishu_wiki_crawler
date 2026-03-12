@@ -136,3 +136,11 @@
 - [x] UI: warning khi authMode=app (cần User Access Token)
 - [x] UI: auto-download ZIP khi xong, nút Re-download
 - [x] Tests: vitest cho sanitizeFilename, resolveAccessToken, isValidFormat, deduplication (21 tests pass)
+
+## Export MD ZIP - Tổ chức theo thư mục phân cấp
+
+- [x] Backend: xây dựng map nodeToken → đường dẫn thư mục dựa trên cây cha-con (buildNodePaths)
+- [x] Backend: mỗi file .md đặt trong thư mục tương ứng với vị trí trong cây wiki
+- [x] Backend: thư mục cha dùng tên title của node cha (sanitized)
+- [x] Backend: xử lý trường hợp node cha không có trong session (fallback về root)
+- [x] Test: 59/59 tests pass cho buildNodePaths, sanitizeFilename, deduplication
