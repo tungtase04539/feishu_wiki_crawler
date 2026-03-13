@@ -122,7 +122,7 @@
 
 ## Bug Fix - MD Export với User Access Token
 
-- [ ] Debug lỗi MD export khi dùng User Access Token
+- [ ] Debug lỗi MD export khi dùng User Access Token (báo lỗi khi tải file)
 - [ ] Fix lỗi
 
 ## Tính năng Export Docx và PDF
@@ -156,3 +156,10 @@
 - [x] UI: action "Export MD" - export markdown từ session cũ
 - [x] UI: badge status (running/paused/done/failed) với màu sắc
 - [x] UI: tab navigation giữa "Crawl" và "Lịch Sử" (header switcher)
+
+## Bug Fix - MD Export lỗi scope 99991672
+
+- [x] UI: detect lỗi 99991672 (thiếu scope docs:document.content:read) và hiển thị hướng dẫn cụ thể 3 bước
+- [x] UI: thêm link trực tiếp đến Feishu Developer Console để bật scope
+- [x] Backend: detect scope error sớm (sau file đầu tiên thất bại), set status=failed ngay lập tức
+- [x] Backend: khi tất cả files failed (0 files thành công), set status=failed thay vì tạo ZIP rỗng

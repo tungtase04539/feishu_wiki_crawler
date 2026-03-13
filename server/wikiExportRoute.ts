@@ -34,6 +34,7 @@ interface ExportJob {
   done: number;
   failed: number;
   errorMsg?: string;
+  lastError?: string;  // last individual file error (for scope detection)
   zipBuffer?: Buffer;
   startedAt: number;
 }
@@ -223,6 +224,13 @@ async function runExportJob(
           console.warn(`[Export] Failed to export ${node.objToken} (${node.title}): ${msg}`);
           job.failed++;
           job.done++;
+          job.lastError = msg;
+          // Early exit if scope error detected (all files will fail)
+          if (msg.includes("99991672") || msg.includes("docs:document.content:read")) {
+            job.status = "failed";
+            job.errorMsg = "SCOPE_ERROR:docs:document.content:read";
+            return;
+          }
         }
       })
     );
@@ -232,12 +240,23 @@ async function runExportJob(
     }
   }
 
+  // If already marked failed (e.g. scope error), skip ZIP
+  if (job.status === "failed") return;
+
+  // If all files failed, mark as failed instead of producing empty ZIP
+  if (files.length === 0 && job.failed > 0) {
+    job.status = "failed";
+    job.errorMsg = job.lastError ?? "All files failed to export";
+    console.warn(`[Export] Job ${job.jobId} failed: 0 files exported, ${job.failed} errors`);
+    return;
+  }
+
   // Build ZIP in memory
   try {
     const zipBuffer = await buildZip(files);
     job.zipBuffer = zipBuffer;
     job.status = "done";
-    console.log(`[Export] Job ${job.jobId} done: ${files.length} files, ${(zipBuffer.length / 1024 / 1024).toFixed(1)} MB`);
+    console.log(`[Export] Job ${job.jobId} done: ${files.length} files (${job.failed} failed), ${(zipBuffer.length / 1024 / 1024).toFixed(1)} MB`);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     job.status = "failed";

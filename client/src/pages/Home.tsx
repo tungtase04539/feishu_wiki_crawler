@@ -571,7 +571,14 @@ export default function Home() {
           } else if (statusData.status === "failed") {
             stopMdPoll();
             setMdExportStatus("failed");
-            setMdExportError(statusData.errorMsg ?? "Export failed");
+            // Detect scope error from errorMsg
+            const errMsg = statusData.errorMsg ?? "Export failed";
+            setMdExportError(errMsg);
+          } else if (statusData.status === "done" && !statusData.hasZip) {
+            // Done but no ZIP = all files failed
+            stopMdPoll();
+            setMdExportStatus("failed");
+            setMdExportError("All files failed to export. Check if your app has the docs:document.content:read scope.");
           }
         } catch (e) {
           console.warn("[MD Export] Poll error:", e);
@@ -1142,8 +1149,24 @@ export default function Home() {
               <Alert variant="destructive" className="py-2">
                 <AlertCircle className="w-4 h-4" />
                 <AlertDescription className="text-xs ml-1">
-                  <strong>Markdown export failed:</strong> {mdExportError}
-                  <Button variant="link" size="sm" className="h-auto p-0 ml-2 text-xs" onClick={handleExportMarkdown}>Retry</Button>
+                  {(mdExportError.includes("99991672") || mdExportError.includes("SCOPE_ERROR") || mdExportError.includes("docs:document.content:read")) ? (
+                    <div className="space-y-1.5">
+                      <p><strong>App thiếu scope để đọc nội dung tài liệu.</strong></p>
+                      <p>Lỗi <code className="bg-red-100 dark:bg-red-900 px-1 rounded text-[10px]">99991672</code>: App chưa được bật scope <code className="bg-red-100 dark:bg-red-900 px-1 rounded text-[10px]">docs:document.content:read</code>.</p>
+                      <p className="font-medium">Cách fix:</p>
+                      <ol className="list-decimal list-inside space-y-0.5 text-[11px]">
+                        <li>Vào <a href="https://open.feishu.cn/app" target="_blank" rel="noopener noreferrer" className="underline font-medium">Feishu Developer Console</a> → chọn app của bạn</li>
+                        <li>Vào <strong>Permissions &amp; Scopes</strong> → tìm và bật <strong>"Read document content"</strong> (<code className="bg-red-100 dark:bg-red-900 px-1 rounded text-[10px]">docs:document.content:read</code>)</li>
+                        <li>Publish/release app lại → lấy User Access Token mới</li>
+                      </ol>
+                      <Button variant="link" size="sm" className="h-auto p-0 text-xs" onClick={handleExportMarkdown}>Thử lại</Button>
+                    </div>
+                  ) : (
+                    <>
+                      <strong>Markdown export failed:</strong> {mdExportError}
+                      <Button variant="link" size="sm" className="h-auto p-0 ml-2 text-xs" onClick={handleExportMarkdown}>Retry</Button>
+                    </>
+                  )}
                 </AlertDescription>
               </Alert>
             )}
